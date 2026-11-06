@@ -12,9 +12,11 @@ import { CollisionWorld } from './core/CollisionWorld';
 import { RenderPipeline } from './core/RenderPipeline';
 import { MapRegistry } from './core/MapRegistry';
 import { MatchManager } from './core/MatchManager';
+import { AuthManager } from './core/AuthManager';
 import { ArenaPlayerController } from './player/ArenaPlayerController';
 import { WeaponViewModel } from './player/WeaponViewModel';
 import { PlayerHUD } from './player/PlayerHUD';
+import { AuthUI } from './player/AuthUI';
 import { WEAPONS } from './weapons/WeaponDatabase';
 import { WeaponSystem } from './weapons/WeaponSystem';
 import { LootDropManager } from './weapons/LootDropManager';
@@ -72,8 +74,172 @@ const syncShootables = () => {
 botDirector.onShootablesChanged = syncShootables;
 
 let hud: PlayerHUD | null = null;
+const authManager = new AuthManager();
+let authUI: AuthUI | null = null;
+let isSpectatorAttractMode = true;
+
+// Orbital Spectator Camera state for Login/Signup Attract Mode
+let spectatorOrbitAngle = Math.random() * Math.PI * 2;
+const spectatorLookAtSmooth = new THREE.Vector3(0, 1.5, 0);
+const spectatorCamPosSmooth = new THREE.Vector3(0, 10, 20);
+
+function getSpectatorOrbitConfig(mapId: MapId): {
+  radiusX: number;
+  radiusZ: number;
+  baseY: number;
+  bobAmpY: number;
+  angularSpeed: number;
+} {
+  switch (mapId) {
+    case 'killhouse_alpha':
+      // Inside 56x56 SAS Hangar (ceiling at 11.5m, central tower at 3.0m)
+      return { radiusX: 18.5, radiusZ: 18.5, baseY: 7.8, bobAmpY: 0.75, angularSpeed: 0.14 };
+    case 'blacksite_khyber':
+      // Dusk Mountain FOB overlooking central helipad & bunkers
+      return { radiusX: 23.0, radiusZ: 21.0, baseY: 11.8, bobAmpY: 1.2, angularSpeed: 0.13 };
+    case 'severomorsk_dock':
+      // Submarine Pen overlooking moored Typhoon sub & multi-tier catwalks
+      return { radiusX: 21.0, radiusZ: 26.0, baseY: 10.6, bobAmpY: 1.1, angularSpeed: 0.12 };
+    case 'bone_yard':
+    default:
+      // Desert Aircraft Scrapyard overlooking C-130 fuselage maze & sniper berms
+      return { radiusX: 25.0, radiusZ: 24.0, baseY: 12.4, bobAmpY: 1.35, angularSpeed: 0.12 };
+  }
+}
+
+function updateOrbitalSpectatorCamera(dt: number): void {
+  const mapId = currentMap ? currentMap.mapId : 'killhouse_alpha';
+  const cfg = getSpectatorOrbitConfig(mapId);
+  spectatorOrbitAngle += cfg.angularSpeed * dt;
+
+  const targetCamX =
+    Math.cos(spectatorOrbitAngle) * cfg.radiusX +
+    Math.sin(spectatorOrbitAngle * 2.1) * 2.4;
+  const targetCamZ =
+    Math.sin(spectatorOrbitAngle) * cfg.radiusZ +
+    Math.cos(spectatorOrbitAngle * 1.7) * 2.4;
+  const targetCamY = cfg.baseY + Math.sin(spectatorOrbitAngle * 1.5) * cfg.bobAmpY;
+
+  const camLerp = 1 - Math.exp(-3.5 * dt);
+  spectatorCamPosSmooth.x += (targetCamX - spectatorCamPosSmooth.x) * camLerp;
+  spectatorCamPosSmooth.y += (targetCamY - spectatorCamPosSmooth.y) * camLerp;
+  spectatorCamPosSmooth.z += (targetCamZ - spectatorCamPosSmooth.z) * camLerp;
+
+  // Compute active bot firefight centroid to pan the camera toward live combat
+  let sumX = 0;
+  let sumY = 0;
+  let sumZ = 0;
+  let weightSum = 0;
+  for (const b of botDirector.bots) {
+    if (!b.alive) continue;
+    const inCombatWeight = b.currentTarget ? 2.5 : 1.0;
+    sumX += b.position.x * inCombatWeight;
+    sumY += (b.position.y + 1.2) * inCombatWeight;
+    sumZ += b.position.z * inCombatWeight;
+    weightSum += inCombatWeight;
+  }
+
+  const desiredLookX = weightSum > 0 ? (sumX / weightSum) * 0.45 : 0;
+  const desiredLookY = weightSum > 0 ? THREE.MathUtils.clamp(sumY / weightSum, 1.0, 3.6) : 1.5;
+  const desiredLookZ = weightSum > 0 ? (sumZ / weightSum) * 0.45 : 0;
+
+  const lookLerp = 1 - Math.exp(-2.2 * dt);
+  spectatorLookAtSmooth.x += (desiredLookX - spectatorLookAtSmooth.x) * lookLerp;
+  spectatorLookAtSmooth.y += (desiredLookY - spectatorLookAtSmooth.y) * lookLerp;
+  spectatorLookAtSmooth.z += (desiredLookZ - spectatorLookAtSmooth.z) * lookLerp;
+
+  worldCamera.position.copy(spectatorCamPosSmooth);
+  worldCamera.lookAt(spectatorLookAtSmooth);
+
+  const lookDx = spectatorLookAtSmooth.x - worldCamera.position.x;
+  const lookDz = spectatorLookAtSmooth.z - worldCamera.position.z;
+  const specYaw = Math.atan2(-lookDx, -lookDz);
+  audio.setListenerPose(
+    worldCamera.position.x,
+    worldCamera.position.y,
+    worldCamera.position.z,
+    specYaw,
+  );
+}
+
+/**
+ * Loads a 3D map in Spectator Attract Mode (8 AI Bots in True Free-For-All,
+ * no human player collider spawned, 15% muffled ambient gunfire, Orbital Spectator Camera).
+ */
+function loadSpectatorAttractMap(mapId: MapId): BuiltMapResult {
+  isSpectatorAttractMode = true;
+  botDirector.spectatorMode = true;
+  viewmodel.scene.visible = false;
+  audio.setSpectatorMuffled(true);
+
+  mapRegistry.setCurrentMap(mapId);
+  lootDrops.clearAll();
+  weapons.clearFX();
+  botDirector.clearFX();
+  hud?.clearDamageIndicators();
+
+  currentMap = mapBuilder.buildMap(
+    mapId,
+    (weaponId, magAmmo, reserveAmmo, pos, vel) => {
+      lootDrops.spawnWeaponDrop(weaponId, magAmmo, reserveAmmo, pos, vel);
+    },
+  );
+  viewmodel.scene.environment = currentMap.environmentTexture;
+
+  spawnSystem.setNodes(currentMap.spawnNodes);
+  botDirector.setObstacleMeshes(currentMap.obstacleMeshes);
+  botDirector.setPatrolWaypoints(currentMap.patrolWaypoints);
+
+  // Park unspawned human player collider safely outside the arena
+  player.position.set(0, -100, 0);
+  player.velocity.set(0, 0, 0);
+  botDirector.playerHealth = 0;
+
+  // Spawn 8 AI Bots in True Free-For-All mode
+  botsInitialized = true;
+  botDirector.setDifficulty('veteran');
+  botDirector.setBotCount(8, weapons.primaryId, player.position);
+  botDirector.resetMatch(weapons.primaryId, player.position);
+  botDirector.playerHealth = 0;
+  botDirector.spectatorMode = true;
+
+  // Clear initial spawn protection on spectator bots and direct half toward arena center
+  // so intense live gunfights & tracer exchanges begin immediately on screen load
+  botDirector.bots.forEach((b, idx) => {
+    spawnSystem.onCombatantFired(b.id);
+    if (idx % 2 === 0 && botDirector.bots.length > 1) {
+      const rival = botDirector.bots[(idx + 1) % botDirector.bots.length];
+      b.notifyGunfireAudio(rival.id, rival.position, performance.now() * 0.001);
+    }
+  });
+
+  // Snap Orbital Spectator Camera to initial high-ground vantage point
+  const cfg = getSpectatorOrbitConfig(mapId);
+  spectatorOrbitAngle = Math.random() * Math.PI * 2;
+  spectatorCamPosSmooth.set(
+    Math.cos(spectatorOrbitAngle) * cfg.radiusX,
+    cfg.baseY,
+    Math.sin(spectatorOrbitAngle) * cfg.radiusZ,
+  );
+  spectatorLookAtSmooth.set(0, 1.6, 0);
+  worldCamera.position.copy(spectatorCamPosSmooth);
+  worldCamera.lookAt(spectatorLookAtSmooth);
+
+  syncShootables();
+  if (window.__arenaGame) {
+    window.__arenaGame.currentMap = currentMap;
+    window.__arenaGame.trainingGround = currentMap;
+  }
+  authUI?.setSectorMapName(currentMap.meta.name);
+  return currentMap;
+}
 
 function loadArenaMap(mapId: MapId): BuiltMapResult {
+  isSpectatorAttractMode = false;
+  botDirector.spectatorMode = false;
+  viewmodel.scene.visible = true;
+  audio.setSpectatorMuffled(false);
+
   mapRegistry.setCurrentMap(mapId);
   lootDrops.clearAll();
   weapons.clearFX();
@@ -133,15 +299,61 @@ const matchManager = new MatchManager(mapRegistry, botDirector, (mapId, cfg) => 
   }
 });
 
-// Build initial default map (Killhouse Alpha) and start active run ready for testing/play
-loadArenaMap(mapRegistry.currentMapId);
-matchManager.phase = 'playing';
+// Boot into Login/Signup Spectator Attract Mode with a rotating non-repeating 3D background map
+const initialSpectatorMapMeta = authManager.selectNextSpectatorBackgroundMap(null);
+loadSpectatorAttractMap(initialSpectatorMapMeta.id);
+matchManager.phase = 'lobby';
 
 const input = new InputManager(pipeline.domElement);
+
+function enterSpectatorAttractMode(): void {
+  if (document.pointerLockElement) {
+    document.exitPointerLock();
+  }
+  input.debugActive = false;
+  const nextMeta = authManager.selectNextSpectatorBackgroundMap(currentMap?.mapId ?? null);
+  loadSpectatorAttractMap(nextMeta.id);
+  matchManager.phase = 'lobby';
+  hud?.setSpectatorHidden(true);
+  authUI?. setSectorMapName(nextMeta.name);
+  authUI?.show('login');
+}
+
+function completeAuthenticationAndEnterLobby(callsign: string): void {
+  isSpectatorAttractMode = false;
+  botDirector.spectatorMode = false;
+  viewmodel.scene.visible = true;
+  audio.setSpectatorMuffled(false);
+
+  authUI?.hide();
+  hud?.setOperatorCallsign(callsign);
+  hud?.setSpectatorHidden(false);
+
+  // Clean up spectator bot match and spawn the human player collider for the Pre-Match Sandbox Lobby
+  lootDrops.clearAll();
+  weapons.clearFX();
+  botDirector.clearFX();
+  hud?.clearDamageIndicators();
+  currentMap.resetTargets();
+
+  const pSpawn = botDirector.selectPlayerSpawn();
+  player.spawn(pSpawn.node.position, pSpawn.node.yaw);
+  botDirector.setDifficulty(matchManager.config.botDifficulty);
+  botDirector.setBotCount(matchManager.config.botCount, weapons.primaryId, player.position);
+  botDirector.resetMatch(weapons.primaryId, player.position);
+  syncShootables();
+
+  matchManager.returnToSandboxLobby();
+  hud?.setPaused(true);
+}
 
 hud = new PlayerHUD(app, settings, mapRegistry, {
   onResumeClick: () => {
     audio.unlock();
+    isSpectatorAttractMode = false;
+    botDirector.spectatorMode = false;
+    viewmodel.scene.visible = true;
+    audio.setSpectatorMuffled(false);
     matchManager.deployFromLobby();
     hud!.hideEndOfRunOverlay();
     hud!.setPaused(false);
@@ -212,7 +424,25 @@ hud = new PlayerHUD(app, settings, mapRegistry, {
     matchManager.returnToSandboxLobby();
     hud!.setPaused(true);
   },
+  onLogoutClick: () => {
+    void authManager.signOut();
+    enterSpectatorAttractMode();
+  },
 });
+
+authUI = new AuthUI(app, authManager, audio, {
+  onAuthenticated: (operator) => {
+    completeAuthenticationAndEnterLobby(operator.callsign);
+  },
+});
+authManager.onDevOtpIntercept = (code) => {
+  authUI?.showDevCommsIntercept(code);
+};
+
+// Initialize in Spectator Attract Mode behind the Login UI
+hud.setSpectatorHidden(true);
+authUI.setSectorMapName(currentMap.meta.name);
+authUI.show('login');
 
 matchManager.onPhaseChanged = (phase, summary) => {
   if (phase === 'post_match') {
@@ -269,17 +499,20 @@ window.addEventListener(
 );
 
 input.onLockChange = (locked) => {
+  if (isSpectatorAttractMode) return;
   if (matchManager.phase === 'post_match' || matchManager.phase === 'death_cam') return;
   if (!locked && input.debugActive) return;
   hud!.setPaused(!locked);
 };
 input.onLockError = (msg) => {
+  if (isSpectatorAttractMode) return;
   if (matchManager.phase === 'post_match' || matchManager.phase === 'death_cam') return;
   if (input.debugActive) return;
   hud!.setPaused(true, msg);
 };
 
 pipeline.domElement.addEventListener('click', () => {
+  if (isSpectatorAttractMode) return;
   if (!input.active && matchManager.phase !== 'post_match') {
     audio.unlock();
     void input.requestLock();
@@ -336,6 +569,29 @@ let heartbeatCooldown = 0;
 
 function stepFrame(rawDt: number): void {
   const dt = rawDt * matchManager.timeScale;
+
+  // Spectator Attract Mode (Login / Signup / 6-Digit OTP Screen)
+  if (isSpectatorAttractMode) {
+    updateOrbitalSpectatorCamera(rawDt);
+
+    // Update 8 AI Bots fighting in True Free-For-All & physical weapon drops
+    tmpPlayerEye.set(0, -100, 0);
+    lootDrops.update(rawDt, player.position, worldCamera, false);
+    botDirector.update(
+      rawDt,
+      player.position,
+      tmpPlayerEye,
+      player.velocity,
+      weapons.primaryId,
+      weapons.currentId,
+    );
+    currentMap.update(rawDt);
+
+    pipeline.render(rawDt);
+    input.endFrame();
+    return;
+  }
+
   const lobbyOpen = hud!.isLobbyVisible();
   const playerAlive = botDirector.playerHealth > 0 && matchManager.phase === 'playing';
 
@@ -698,6 +954,9 @@ declare global {
       viewmodel: WeaponViewModel;
       input: InputManager;
       hud: PlayerHUD;
+      authManager: AuthManager;
+      authUI: AuthUI;
+      enterSpectatorAttractMode: () => void;
       worldCamera: THREE.PerspectiveCamera;
       settings: typeof settings;
       stepFrame: (dt: number) => void;
@@ -721,6 +980,9 @@ window.__arenaGame = {
   viewmodel,
   input,
   hud: hud!,
+  authManager,
+  authUI: authUI!,
+  enterSpectatorAttractMode,
   worldCamera,
   settings,
   stepFrame,
@@ -734,6 +996,10 @@ const ENABLE_QA_HARNESS =
 
 if (ENABLE_QA_HARNESS) {
   const ensureActivePlay = () => {
+    if (isSpectatorAttractMode) {
+      completeAuthenticationAndEnterLobby('QA-OPERATOR');
+      matchManager.deployFromLobby();
+    }
     input.debugActive = true;
     if (hud!.isLobbyVisible()) {
       hud!.setPaused(false);

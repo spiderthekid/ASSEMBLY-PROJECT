@@ -573,7 +573,7 @@ export class BotAgent implements CombatantTarget {
       audioEntry !== undefined && nowSec - audioEntry.time <= 4.0 && dist <= AUDIO_DETECTION_RANGE;
     // Footstep / tactical proximity awareness so bots actively converge in FFA
     const hasProximityAudio = !target.isPlayer
-      ? dist <= 28.0
+      ? dist <= 52.0
       : dist <= 15.0 && target.velocity.lengthSq() > 9.0;
     const isAudible = hasGunfireAudio || hasProximityAudio;
 

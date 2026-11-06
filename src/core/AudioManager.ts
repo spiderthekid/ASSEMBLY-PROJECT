@@ -10,6 +10,7 @@ export class AudioManager {
   private master: GainNode | null = null;
   private noise: AudioBuffer | null = null;
   private volume = 0.6;
+  private spectatorMuffled = false;
 
   // Listener pose for 3D spatialization
   private listenerX = 0;
@@ -51,7 +52,20 @@ export class AudioManager {
 
   setVolume(v: number): void {
     this.volume = v;
-    if (this.master) this.master.gain.value = v;
+    if (this.master) {
+      this.master.gain.value = this.spectatorMuffled ? v * 0.15 : v;
+    }
+  }
+
+  /**
+   * Mutes/lowers gunfire and ambient combat audio to 15% muffled volume during
+   * Spectator Attract Mode on the Login/Signup screen.
+   */
+  setSpectatorMuffled(muffled: boolean): void {
+    this.spectatorMuffled = muffled;
+    if (this.master) {
+      this.master.gain.value = muffled ? this.volume * 0.15 : this.volume;
+    }
   }
 
   /**
@@ -117,8 +131,10 @@ export class AudioManager {
     panner.pan.value = pan;
     panner.connect(this.master);
 
-    const airCutoff = Math.max(650, 2800 - distance * 32);
-    this.triggerGunshotNodes(ctx, panner, p, gainMult * 0.48, airCutoff);
+    const rawCutoff = Math.max(650, 2800 - distance * 32);
+    const airCutoff = this.spectatorMuffled ? Math.min(rawCutoff, 720) : rawCutoff;
+    const gainScale = this.spectatorMuffled ? gainMult * 0.15 : gainMult * 0.48;
+    this.triggerGunshotNodes(ctx, panner, p, gainScale, airCutoff);
   }
 
   private triggerGunshotNodes(

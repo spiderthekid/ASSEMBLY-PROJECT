@@ -104,6 +104,10 @@ export interface HUDUpdatePayload {
 export class PlayerHUD {
   private readonly reticleCanvas: HTMLCanvasElement;
   private readonly reticleCtx: CanvasRenderingContext2D;
+  private readonly hudRootEl: HTMLElement;
+
+  // Sandbox Lobby Operator Auth Header
+  private readonly lobbyOperatorCallsignEl: HTMLElement;
 
   private readonly fpsVal: HTMLElement;
   private readonly frameVal: HTMLElement;
@@ -190,6 +194,7 @@ export class PlayerHUD {
       onDeployRandomMap: () => void;
       onInstantRematch: () => void;
       onReturnToLobby: () => void;
+      onLogoutClick?: () => void;
     },
   ) {
     this.reticleCanvas = document.createElement('canvas');
@@ -201,6 +206,7 @@ export class PlayerHUD {
 
     const hud = document.createElement('div');
     hud.id = 'hud-root';
+    this.hudRootEl = hud;
     hud.innerHTML = `
       <div class="hud-damage-flash" id="hud-damage-flash"></div>
       <div class="hud-low-hp-vignette" id="hud-low-hp-vignette"></div>
@@ -317,7 +323,13 @@ export class PlayerHUD {
             <div class="overlay-tag">PC TACTICAL ARENA FPS // PERMADEATH SCAVENGER EDITION</div>
             <h1>ASSEMBLY</h1>
           </div>
-          <div class="overlay-badge">ALL WEAPONS &amp; MAPS UNLOCKED · 1-LIFE FFA</div>
+          <div class="overlay-header-right">
+            <div class="lobby-operator-bar">
+              <span class="lobby-operator-tag" id="lobby-operator-callsign">OPERATOR: GHOST-01</span>
+              <button id="btn-logout" type="button" class="btn-logout">[ LOGOUT ]</button>
+            </div>
+            <div class="overlay-badge">ALL WEAPONS &amp; MAPS UNLOCKED · 1-LIFE FFA</div>
+          </div>
         </div>
 
         <p class="overlay-status" id="lock-status">Configure your Starting Loadout, AI Bot Director, Victory Target, and Map Playlist Queue below, then click <b>DEPLOY TO ARENA</b>.</p>
@@ -414,6 +426,7 @@ export class PlayerHUD {
     this.mapSelectEl = overlay.querySelector('#inp-map-select') as HTMLSelectElement;
     this.playlistWrapEl = overlay.querySelector('#playlist-queue-wrap') as HTMLElement;
     this.singleMapWrapEl = overlay.querySelector('#single-map-wrap') as HTMLElement;
+    this.lobbyOperatorCallsignEl = overlay.querySelector('#lobby-operator-callsign') as HTMLElement;
 
     // 2. End-of-Run Tactical Overlay (#end-of-run-overlay)
     const eor = document.createElement('div');
@@ -629,6 +642,10 @@ export class PlayerHUD {
     (overlay.querySelector('#btn-reset-targets') as HTMLButtonElement).addEventListener('click', () => {
       callbacks.onInstantRematch();
     });
+    const logoutBtn = overlay.querySelector('#btn-logout') as HTMLButtonElement | null;
+    logoutBtn?.addEventListener('click', () => {
+      callbacks.onLogoutClick?.();
+    });
 
     // Wire End-of-Run buttons
     (eor.querySelector('#btn-eor-next-map') as HTMLButtonElement).addEventListener('click', () => {
@@ -738,6 +755,20 @@ export class PlayerHUD {
     }
     this.overlayEl.style.display = paused ? 'flex' : 'none';
     if (statusMessage) this.lockStatusEl.textContent = statusMessage;
+  }
+
+  setOperatorCallsign(callsign: string): void {
+    const clean = (callsign || 'GHOST-01').trim().toUpperCase();
+    this.lobbyOperatorCallsignEl.textContent = `OPERATOR: ${clean}`;
+  }
+
+  setSpectatorHidden(hidden: boolean): void {
+    this.hudRootEl.style.display = hidden ? 'none' : 'block';
+    this.reticleCanvas.style.display = hidden ? 'none' : 'block';
+    if (hidden) {
+      this.overlayEl.style.display = 'none';
+      this.eorOverlayEl.style.display = 'none';
+    }
   }
 
   isLobbyVisible(): boolean {

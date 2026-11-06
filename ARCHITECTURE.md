@@ -11,8 +11,8 @@
 - **Asymmetric Loadouts & Scavenging:** Every combatant spawns with a different primary weapon from the 8-weapon military roster. Player spawns with scarce reserve ammo (2 mags). Killed bots drop their physical weapon with remaining ammo; Player presses `[F]` to swap weapons or walks over matching weapons to scavenge ammo.
 
 ## 2. Directory Structure
-- `/src/core/` -> `MatchManager`, `MapRegistry`, `InputManager`, `AudioManager`
-- `/src/player/` -> `ArenaPlayerController`, `WeaponViewModel`, `PlayerHUD`
+- `/src/core/` -> `MatchManager`, `MapRegistry`, `InputManager`, `AudioManager`, `AuthManager`
+- `/src/player/` -> `ArenaPlayerController`, `WeaponViewModel`, `PlayerHUD`, `AuthUI`
 - `/src/weapons/` -> `WeaponDatabase` (8 military guns), `WeaponSystem`, `LootDropManager`
 - `/src/ai/` -> `BotDirector`, `BotAgent` (FFA threat matrix, NavMesh/waypoint pathing, loadout-aware combat)
 - `/src/maps/` -> `MapBuilder`, `SpawnSystem` (anti-spawn-trap LOS/distance scoring), `MapAssets` (Killhouse Alpha, Black Site Khyber, Severomorsk Dock, Bone Yard)

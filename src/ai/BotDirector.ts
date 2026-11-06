@@ -59,6 +59,13 @@ interface BotTracer {
   maxAge: number;
 }
 
+interface BotMuzzleFlash {
+  mesh: THREE.Mesh;
+  mat: THREE.MeshBasicMaterial;
+  age: number;
+  maxAge: number;
+}
+
 export type BotDifficultySetting = BotDifficulty | 'mixed';
 
 const MIXED_TIERS: BotDifficulty[] = ['recruit', 'regular', 'veteran', 'nightmare'];
@@ -93,7 +100,9 @@ export class BotDirector {
   private readonly obstacleMeshes: THREE.Object3D[] = [];
   private readonly patrolWaypoints: THREE.Vector3[] = [];
   private readonly tracers: BotTracer[] = [];
-  private readonly tracerGeo = new THREE.CylinderGeometry(0.012, 0.012, 1, 6, 1, true);
+  private readonly muzzleFlashes: BotMuzzleFlash[] = [];
+  private readonly tracerGeo = new THREE.CylinderGeometry(0.014, 0.014, 1, 6, 1, true);
+  private readonly muzzleFlashGeo = new THREE.OctahedronGeometry(0.18, 1);
   private readonly upAxis = new THREE.Vector3(0, 1, 0);
   private readonly tmpQuat = new THREE.Quaternion();
 
@@ -110,6 +119,8 @@ export class BotDirector {
   playerHealth = 100;
   readonly playerMaxHealth = 100;
   playerGodMode = false;
+  /** When true (Login/Signup Spectator Attract Mode), human player collider is excluded and 8 bots fight in pure FFA. */
+  spectatorMode = false;
 
   constructor(
     private readonly worldScene: THREE.Scene,
@@ -135,7 +146,7 @@ export class BotDirector {
 
   getLivingCombatants(): CombatantTarget[] {
     const list: CombatantTarget[] = [];
-    if (this.playerHealth > 0) list.push(this.playerTarget);
+    if (!this.spectatorMode && this.playerHealth > 0) list.push(this.playerTarget);
     for (const b of this.bots) {
       if (b.alive) list.push(b);
     }
@@ -311,7 +322,7 @@ export class BotDirector {
     this.playerTarget.position.copy(playerPos);
     this.playerTarget.eyePosition.copy(playerEyePos);
     this.playerTarget.velocity.copy(playerVel);
-    this.playerTarget.alive = this.playerHealth > 0;
+    this.playerTarget.alive = !this.spectatorMode && this.playerHealth > 0;
 
     for (const b of this.bots) {
       b.hitboxGroup.userData.onBulletHit = (dmg: number, zone: HitZone): boolean => {
@@ -319,7 +330,9 @@ export class BotDirector {
       };
     }
 
-    const allCombatants: CombatantTarget[] = [this.playerTarget, ...this.bots];
+    const allCombatants: CombatantTarget[] = this.spectatorMode
+      ? [...this.bots]
+      : [this.playerTarget, ...this.bots];
 
     for (const bot of this.bots) {
       if (!bot.alive) {
@@ -411,6 +424,7 @@ export class BotDirector {
       65,
     );
 
+    this.spawnBotMuzzleFlash(shot.muzzleWorld, shot.weaponDef.fx.tracerColor);
     this.spawnBotTracer(shot.muzzleWorld, shot.endPoint, shot.weaponDef.fx.tracerColor);
 
     if (!shot.hitTargetId || !shot.hitZone || shot.damage <= 0) return;
@@ -465,6 +479,23 @@ export class BotDirector {
     }
   }
 
+  private spawnBotMuzzleFlash(pos: THREE.Vector3, rgb: [number, number, number]): void {
+    const mat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(rgb[0] * 4.5, rgb[1] * 4.2, rgb[2] * 3.6),
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(this.muzzleFlashGeo, mat);
+    mesh.position.copy(pos);
+    const s = 0.85 + Math.random() * 0.65;
+    mesh.scale.set(s, s, s * 1.6);
+    mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+    this.worldScene.add(mesh);
+    this.muzzleFlashes.push({ mesh, mat, age: 0, maxAge: 0.05 });
+  }
+
   private spawnBotTracer(start: THREE.Vector3, end: THREE.Vector3, rgb: [number, number, number]): void {
     const delta = new THREE.Vector3().subVectors(end, start);
     const len = delta.length();
@@ -497,6 +528,13 @@ export class BotDirector {
       tr.mat.dispose();
     }
     this.tracers.length = 0;
+
+    for (let i = this.muzzleFlashes.length - 1; i >= 0; i--) {
+      const mf = this.muzzleFlashes[i];
+      this.worldScene.remove(mf.mesh);
+      mf.mat.dispose();
+    }
+    this.muzzleFlashes.length = 0;
   }
 
   private updateTracers(dt: number): void {
@@ -509,6 +547,18 @@ export class BotDirector {
         this.tracers.splice(i, 1);
       } else {
         tr.mat.opacity = 1 - tr.age / tr.maxAge;
+      }
+    }
+
+    for (let i = this.muzzleFlashes.length - 1; i >= 0; i--) {
+      const mf = this.muzzleFlashes[i];
+      mf.age += dt;
+      if (mf.age >= mf.maxAge) {
+        this.worldScene.remove(mf.mesh);
+        mf.mat.dispose();
+        this.muzzleFlashes.splice(i, 1);
+      } else {
+        mf.mat.opacity = 1 - mf.age / mf.maxAge;
       }
     }
   }
